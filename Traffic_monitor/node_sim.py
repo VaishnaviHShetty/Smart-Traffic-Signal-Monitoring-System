@@ -56,7 +56,13 @@ def _sender(node_id):
     location  = NODES[node_id]["name"]
     send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     seq       = 0
+
+    # ── Stateful vehicle count — starts between 10 and 28 ────────────────────
+    vehicle_count = random.randint(10, 28)
+
     print(f"[Node-{node_id}] Sending to {CONTROLLER_HOST}:{NODE_SEND_PORT}")
+    print(f"[Node-{node_id}] Starting vehicle count: {vehicle_count}")
+
     while True:
         with _state_lock:
             signal       = _current_signal
@@ -64,13 +70,23 @@ def _sender(node_id):
             vehicle_type = _vehicle_type
 
         if priority:
+            # Priority active — snap to 1, bypass stateful logic entirely
             vehicle_count = 1
-        elif signal == "RED":
-            vehicle_count = random.randint(20, 50)
-        elif signal == "YELLOW":
-            vehicle_count = random.randint(10, 30)
+
         else:
-            vehicle_count = random.randint(0, 20)
+            # ── Stateful nudge based on current signal ────────────────────────
+            # RED    → vehicles queue up    → count climbs
+            # GREEN  → vehicles flow out    → count drains
+            # YELLOW → slowing down         → slight drain
+            if signal == "RED":
+                vehicle_count += random.randint(3, 6)
+            elif signal == "GREEN":
+                vehicle_count -= random.randint(2, 4)
+            elif signal == "YELLOW":
+                vehicle_count -= random.randint(0, 2)
+
+            # Clamp between 0 and 60
+            vehicle_count = max(0, min(60, vehicle_count))
 
         payload = {
             "node_id":       node_id,
