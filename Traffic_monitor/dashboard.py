@@ -46,7 +46,7 @@ class Dashboard:
         root.resizable(True, True)
 
         self._build_titlebar()
-        self._build_priority_banner()   # ← NEW
+        self._build_priority_banner()
         self._build_body()
         self._build_statusbar()
 
@@ -64,7 +64,7 @@ class Dashboard:
                                    font=("Courier", 9))
         self.conn_label.pack(side="right", padx=16)
 
-    # ── Priority banner (hidden by default) ───────────────────────────────────
+    # ── Priority banner ────────────────────────────────────────────────────────
     def _build_priority_banner(self):
         self.banner = tk.Frame(self.root, bg="#3a0808", height=36)
         # Not packed yet — shown only when priority is active
@@ -76,6 +76,15 @@ class Dashboard:
             font=("Courier", 11, "bold")
         )
         self.banner_label.pack(expand=True, pady=8)
+
+        # Queue sub-label — shows waiting nodes when queue depth > 1
+        self.banner_queue_label = tk.Label(
+            self.banner,
+            text="",
+            bg="#3a0808", fg=ORANGE,
+            font=("Courier", 9)
+        )
+        self.banner_queue_label.pack(pady=(0, 6))
 
     # ── 2×2 body grid ─────────────────────────────────────────────────────────
     def _build_body(self):
@@ -139,8 +148,9 @@ class Dashboard:
                         font=("Courier", 8, "bold"), relief="flat")
         style.map("T.Treeview", background=[("selected", BORDER2)])
 
-        cols   = ("Node", "Location", "Vehicles", "Signal", "Priority", "Status", "Node IP")
-        widths = [60, 120, 70, 80, 70, 90, 110]
+        # Added "Queue" column to show priority queue position
+        cols   = ("Node", "Location", "Vehicles", "Signal", "Priority", "Queue", "Status", "Node IP")
+        widths = [60, 120, 70, 80, 70, 60, 90, 110]
         self.tree = ttk.Treeview(f, columns=cols, show="headings",
                                  style="T.Treeview", height=7)
         for c, w in zip(cols, widths):
@@ -197,7 +207,7 @@ class Dashboard:
     def refresh(self):
         global _flash_state
         snap = server.get_snapshot()
-        _flash_state = not _flash_state   # toggle flash every refresh
+        _flash_state = not _flash_state
 
         self._refresh_priority_banner(snap)
         self._refresh_stats(snap)
@@ -210,16 +220,30 @@ class Dashboard:
     # ── Priority banner ───────────────────────────────────────────────────────
     def _refresh_priority_banner(self, snap):
         pnode = snap.get("priority_node")
+        queue = snap.get("priority_queue", [])
+
         if pnode:
             location = NODES.get(pnode, {}).get("name", pnode)
             self.banner_label.config(
                 text=f"🚨  PRIORITY VEHICLE ACTIVE  —  Node-{pnode} ({location})  —  ALL others forced RED  🚨",
                 fg=RED if _flash_state else ORANGE
             )
+
+            # Show waiting queue if depth > 1
+            waiting = [n for n in queue if n != pnode]
+            if waiting:
+                wait_str = "  |  Queue: " + " → ".join(f"Node-{n}" for n in waiting)
+                self.banner_queue_label.config(text=wait_str)
+                self.banner_queue_label.pack(pady=(0, 6))
+            else:
+                self.banner_queue_label.config(text="")
+                self.banner_queue_label.pack_forget()
+
             self.banner.pack(fill="x", after=self.root.winfo_children()[0])
             self.root.configure(bg="#1a0505")
         else:
             self.banner.pack_forget()
+            self.banner_queue_label.pack_forget()
             self.root.configure(bg=BG)
 
     def _refresh_stats(self, snap):
@@ -245,28 +269,50 @@ class Dashboard:
         now    = time.time()
         sstate = snap["signal_state"]
         pnode  = snap.get("priority_node")
+        queue  = snap.get("priority_queue", [])
 
         for nid in sorted(NODES.keys()):
             info = snap["node_data"].get(nid)
             if info:
-                vc        = info["vehicle_count"]
-                sig       = sstate.get(nid, "RED")
-                stat      = info["status"]
-                node_ip   = info.get("node_ip", "—")
-                is_pri    = info.get("priority", False)
-                pri_txt   = "🚨 YES" if is_pri else "—"
-                tag       = f"{nid}_pri" if is_pri else f"{nid}_sig"
-                row_color = ORANGE if is_pri else SIGNAL_COLORS.get(sig, MUTED)
+                vc      = info["vehicle_count"]
+                sig     = sstate.get(nid, "RED")
+                stat    = info["status"]
+                node_ip = info.get("node_ip", "—")
+                is_pri  = info.get("priority", False)
+
+                # Priority column
+                if nid == pnode:
+                    pri_txt = "🚨 ACTIVE"
+                elif nid in queue:
+                    pos = queue.index(nid) + 1
+                    pri_txt = f"⏳ #{pos}"
+                else:
+                    pri_txt = "—"
+
+                # Queue position column
+                if nid in queue:
+                    q_pos = str(queue.index(nid) + 1)
+                else:
+                    q_pos = "—"
+
+                tag = f"{nid}_pri" if nid == pnode else (f"{nid}_wait" if nid in queue else f"{nid}_sig")
+
+                if nid == pnode:
+                    row_color = RED if _flash_state else ORANGE
+                elif nid in queue:
+                    row_color = ORANGE
+                else:
+                    row_color = SIGNAL_COLORS.get(sig, MUTED)
 
                 self.tree.insert("", "end",
                                  values=(f"Node-{nid}", info["location"],
-                                         vc, sig, pri_txt, stat, node_ip),
+                                         vc, sig, pri_txt, q_pos, stat, node_ip),
                                  tags=(tag,))
                 self.tree.tag_configure(tag, foreground=row_color)
             else:
                 self.tree.insert("", "end",
                                  values=(f"Node-{nid}", NODES[nid]["name"],
-                                         "—", "—", "—", "OFFLINE", "—"),
+                                         "—", "—", "—", "—", "OFFLINE", "—"),
                                  tags=("offline",))
                 self.tree.tag_configure("offline", foreground=MUTED)
 
@@ -275,9 +321,10 @@ class Dashboard:
         self.alert_box.delete("1.0", "end")
         for entry in snap["alert_log"]:
             lvl = entry["level"]
-            # Map "critical" alerts that mention PRIORITY to "priority" tag
-            if "PRIORITY" in entry["message"] or "Priority" in entry["message"]:
+            if "PRIORITY" in entry["message"] or "Priority" in entry["message"] or "🚨" in entry["message"]:
                 lvl = "priority"
+            elif "cleared" in entry["message"] or "✅" in entry["message"] or "promoted" in entry["message"].lower():
+                lvl = "warning"
             self.alert_box.insert("end", f"[{entry['time_str']}] ", "time")
             self.alert_box.insert("end", entry["message"] + "\n", lvl)
         self.alert_box.config(state="disabled")
